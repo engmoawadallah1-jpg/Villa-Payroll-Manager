@@ -18,3 +18,8 @@ expertMode = true
 [postMerge]
 path = "scripts/post-merge.sh"
 timeoutMs = 20000
+
+[userenv]
+
+[userenv.shared]
+VILLA_PAYROLL_ALLOWED_EMAILS = "eng.mo.awadallah1@gmail.com"

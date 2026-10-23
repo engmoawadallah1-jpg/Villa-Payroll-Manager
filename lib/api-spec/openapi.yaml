@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: villa-app-state
+    description: Shared Villa Payroll Manager records
 paths:
   /healthz:
     get:
@@ -24,6 +26,71 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /app-state:
+    get:
+      operationId: getVillaAppState
+      tags: [villa-app-state]
+      summary: Get the shared app state
+      responses:
+        "200":
+          description: Current shared state, or an uninitialized revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStateResponse"
+        "401":
+          description: Sign-in is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The signed-in account is not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    put:
+      operationId: updateVillaAppState
+      tags: [villa-app-state]
+      summary: Save the shared app state if the revision is current
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AppStateUpdate"
+      responses:
+        "200":
+          description: Updated shared state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStateResponse"
+        "400":
+          description: Invalid app state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Sign-in is required
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: The signed-in account is not approved
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "409":
+          description: Another device saved a newer revision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AppStateConflictResponse"
 components:
   schemas:
     HealthStatus:
@@ -33,4 +100,129 @@ components:
           type: string
       required:
         - status
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+    ReservationStatus:
+      type: string
+      enum: [confirmed, checked-in, checked-out, blocked]
+    Villa:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        nameEn: { type: string }
+        rooms:
+          type: array
+          items: { type: string }
+        archivedRooms:
+          type: array
+          items: { type: string }
+        archived:
+          type: boolean
+      required: [id, name, nameEn, rooms]
+    Booking:
+      type: object
+      properties:
+        id: { type: string }
+        villaId: { type: string }
+        roomName: { type: string }
+        guestName: { type: string }
+        phone: { type: string }
+        from: { type: string }
+        to: { type: string }
+        totalAmount: { type: number }
+        advance: { type: number }
+        remaining: { type: number }
+        status: { $ref: "#/components/schemas/ReservationStatus" }
+      required:
+        - id
+        - villaId
+        - roomName
+        - guestName
+        - phone
+        - from
+        - to
+        - totalAmount
+        - advance
+        - remaining
+        - status
+    Staff:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        salary: { type: number }
+        workingDays: { type: number }
+        offDays: { type: number }
+      required: [id, name, salary, workingDays, offDays]
+    EmployeeSnapshot:
+      type: object
+      properties:
+        id: { type: string }
+        name: { type: string }
+        baseSalary: { type: number }
+        scheduledDays: { type: number }
+        attendedDays: { type: number }
+        offDays: { type: number }
+        bonus: { type: number }
+        deductions: { type: number }
+        netPayout: { type: number }
+      required:
+        - id
+        - name
+        - baseSalary
+        - scheduledDays
+        - attendedDays
+        - offDays
+        - bonus
+        - deductions
+        - netPayout
+    PayrollMonth:
+      type: object
+      properties:
+        id: { type: string, pattern: "^[0-9]{4}-(0[1-9]|1[0-2])$" }
+        employees:
+          type: array
+          items: { $ref: "#/components/schemas/EmployeeSnapshot" }
+      required: [id, employees]
+    AppData:
+      type: object
+      properties:
+        version: { type: integer, enum: [2] }
+        villas:
+          type: array
+          items: { $ref: "#/components/schemas/Villa" }
+        staff:
+          type: array
+          items: { $ref: "#/components/schemas/Staff" }
+        bookings:
+          type: array
+          items: { $ref: "#/components/schemas/Booking" }
+        payrollMonths:
+          type: array
+          items: { $ref: "#/components/schemas/PayrollMonth" }
+      required: [version, villas, staff, bookings, payrollMonths]
+    AppStateResponse:
+      type: object
+      properties:
+        initialized: { type: boolean }
+        revision: { type: integer, minimum: 0 }
+        data: { $ref: "#/components/schemas/AppData" }
+      required: [initialized, revision]
+    AppStateUpdate:
+      type: object
+      properties:
+        revision: { type: integer, minimum: 0 }
+        data: { $ref: "#/components/schemas/AppData" }
+      required: [revision, data]
+    AppStateConflictResponse:
+      type: object
+      properties:
+        error: { type: string }
+        current: { $ref: "#/components/schemas/AppStateResponse" }
+      required: [error, current]
 

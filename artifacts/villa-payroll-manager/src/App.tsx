@@ -1,11 +1,15 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import NotFound from '@/pages/not-found';
-import { Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
-import { Building2, CalendarDays, UsersRound, WalletCards, Plus, Trash2, Share2, Globe2, ShieldCheck, Download, Upload, ChevronDown, AlertTriangle, Check, CircleHelp, ArrowUpRight, X, BedDouble, FileText, LayoutGrid, Boxes, Pencil } from 'lucide-react';
+import { Redirect, Route, Switch, useLocation, Router as WouterRouter } from 'wouter';
+import { ClerkProvider, SignIn, SignUp, useAuth, useClerk } from '@clerk/react';
+import { publishableKeyFromHost } from '@clerk/react/internal';
+import { shadcn } from '@clerk/themes';
+import '@clerk/themes/shadcn.css';
+import { Building2, CalendarDays, UsersRound, WalletCards, Plus, Trash2, Share2, Globe2, ShieldCheck, Download, Upload, ChevronDown, AlertTriangle, Check, CircleHelp, ArrowUpRight, X, BedDouble, FileText, LayoutGrid, Boxes, Pencil, LogOut } from 'lucide-react';
 import { calculateNetPayout as calcNet, createEmployeeSnapshots as newSnapshot, isValidMonthId as validMonthId, updatePayrollEmployee } from './payroll';
 import type { EmployeeSnapshot, PayrollEditableField, PayrollMonth, Staff } from './payroll';
 import { migrateAppData, hasReservationConflict } from './operations';
@@ -13,6 +17,70 @@ import type { AppData, Booking, ReservationStatus, Villa } from './operations';
 import { OperationsPanels } from './OperationsPanels';
 
 const STORE_KEY = 'awadallah-ops-v1';
+const APP_STATE_PATH = '/api/app-state';
+const basePath = import.meta.env.BASE_URL.replace(/\/$/, '');
+const clerkPubKey = publishableKeyFromHost(
+  window.location.hostname,
+  import.meta.env.VITE_CLERK_PUBLISHABLE_KEY,
+);
+const clerkProxyUrl = import.meta.env.VITE_CLERK_PROXY_URL;
+
+if (!clerkPubKey) {
+  throw new Error('Missing VITE_CLERK_PUBLISHABLE_KEY.');
+}
+
+function stripBase(path: string): string {
+  return basePath && path.startsWith(basePath)
+    ? path.slice(basePath.length) || '/'
+    : path;
+}
+
+const clerkAppearance = {
+  theme: shadcn,
+  cssLayerName: 'clerk',
+  options: {
+    logoPlacement: 'inside' as const,
+    logoLinkUrl: basePath || '/',
+    logoImageUrl: `${window.location.origin}${basePath}/logo.svg`,
+  },
+  variables: {
+    colorPrimary: '#c08a2e',
+    colorForeground: '#25303d',
+    colorMutedForeground: '#737b88',
+    colorDanger: '#ba3c32',
+    colorBackground: '#fffcf6',
+    colorInput: '#ffffff',
+    colorInputForeground: '#25303d',
+    colorNeutral: '#ddd6ca',
+    fontFamily: "'DM Sans', 'Noto Sans Arabic', sans-serif",
+    borderRadius: '0.75rem',
+  },
+  elements: {
+    rootBox: 'w-full flex justify-center',
+    cardBox: 'bg-[#fffcf6] rounded-2xl w-[440px] max-w-full overflow-hidden border border-[#e4dccf] shadow-xl',
+    card: '!shadow-none !border-0 !bg-transparent !rounded-none',
+    footer: '!shadow-none !border-0 !bg-transparent !rounded-none',
+    headerTitle: 'text-[#25303d] font-bold',
+    headerSubtitle: 'text-[#737b88]',
+    formFieldLabel: 'text-[#25303d]',
+    footerActionLink: 'text-[#9a6a19] hover:text-[#724e12]',
+    footerActionText: 'text-[#737b88]',
+    formButtonPrimary: 'bg-[#c08a2e] text-[#202a35] hover:bg-[#aa7622]',
+    formFieldInput: 'border-[#ddd6ca] bg-white text-[#25303d]',
+    alert: 'border-[#ead8d4] bg-[#fff5f3]',
+  },
+};
+
+type SharedAppState = {
+  initialized: boolean;
+  revision: number;
+  data?: AppData;
+};
+
+type SharedAppStateConflict = {
+  error: string;
+  current: SharedAppState;
+};
 const SEED_VILLAS: Villa[] = [
   { id:'190', name:'فيلا 190', nameEn:'Villa 190', rooms:['1','2','11','12','13','14','15','21','22','23','24','25','26','31'] },
   { id:'196', name:'فيلا 196', nameEn:'Villa 196', rooms:['كارما','فرستشي','تفاني','توكبو','هوجو','شقه 1','شقه 2'] },
@@ -65,9 +133,15 @@ function readInitial(): AppData {
 }
 
 const queryClient = new QueryClient();
-function Home() {
+function PayrollWorkspace() {
   const [data, setData] = useState<AppData>(readInitial);
   const [lang, setLang] = useState<'en'|'ar'>('en');
+  const [syncStatus, setSyncStatus] = useState<'loading'|'saved'|'saving'|'offline'|'conflict'>('loading');
+  const [dataReady, setDataReady] = useState(false);
+  const [accessDenied, setAccessDenied] = useState(false);
+  const [sessionExpired, setSessionExpired] = useState(false);
+  const [retryVersion, setRetryVersion] = useState(0);
+  const [conflictedRemote, setConflictedRemote] = useState<SharedAppState | null>(null);
   const [section, setSection] = useState<'bookings'|'dashboard'|'inventory'|'payroll'>('bookings');
   const [selectedVilla, setSelectedVilla] = useState('all');
   const [monthId, setMonthId] = useState(() => data.payrollMonths.some(m=>m.id===currentMonth()) ? currentMonth() : [...data.payrollMonths].sort((a,b)=>b.id.localeCompare(a.id))[0]?.id || currentMonth());
@@ -78,20 +152,196 @@ function Home() {
   const [editingBooking, setEditingBooking] = useState<string|null>(null);
   const [newStaff, setNewStaff] = useState({ name:'', salary:'5000', workingDays:'26', offDays:'4' });
   const importRef = useRef<HTMLInputElement>(null);
+  const dataRef = useRef(data);
+  const revisionRef = useRef(0);
+  const lastSyncedRef = useRef('');
+  const conflictRef = useRef<SharedAppState | null>(null);
+  const savingRef = useRef(false);
+  const { signOut } = useClerk();
   const t = lang === 'ar' ? {
-    bookings:'الحجوزات', payroll:'الرواتب', newBooking:'حجز جديد', villa:'الفيلا', room:'الغرفة', guest:'اسم النزيل', phone:'رقم الهاتف', arrival:'تاريخ الوصول', departure:'تاريخ المغادرة', total:'الإجمالي', advance:'المدفوع مقدماً', remaining:'المتبقي', save:'حفظ الحجز', all:'كل الفلل', emptyBookings:'لا توجد حجوزات في هذا العرض', share:'مشاركة واتساب', remove:'حذف', confirmDelete:'هل تريد حذف هذا الحجز؟', conflict:'الغرفة محجوزة بالفعل خلال هذه التواريخ. اختر غرفة أو موعداً آخر.', invalidDates:'يجب أن يكون تاريخ المغادرة بعد تاريخ الوصول.', month:'شهر الرواتب', createMonth:'إنشاء شهر', monthExists:'هذا الشهر موجود بالفعل.', staff:'الموظفون', salary:'الراتب الأساسي', scheduled:'أيام العمل المجدولة', attended:'أيام الحضور', daysOff:'الإجازات', bonus:'مكافأة', deductions:'خصومات', net:'صافي المستحق', totalPayout:'إجمالي المستحقات', attendance:'الحضور', employees:'موظف', addStaff:'إضافة موظف للطاقم', name:'اسم الموظف', saveStaff:'إضافة للطاقم', noStaff:'لا يوجد موظفون في القائمة الأساسية.', backup:'نسخة احتياطية', export:'تصدير JSON', import:'استيراد نسخة', replaceBackup:'استيراد هذه النسخة سيستبدل الحجوزات والطاقم وكل سجلات الرواتب المحفوظة حالياً على هذا المتصفح. هل تريد المتابعة؟', localNotice:'البيانات محفوظة على هذا المتصفح فقط. صدّر نسخة احتياطية بانتظام.', backupOk:'تم استيراد النسخة الاحتياطية بنجاح.', backupError:'ملف النسخة غير صالح أو لا يتوافق مع صيغة التطبيق.', bookingSaved:'تم حفظ الحجز.', staffAdded:'تمت إضافة الموظف إلى الطاقم. الأشهر السابقة لن تتغير.', deleteStaff:'حذف من الطاقم', noPhone:'لا يوجد رقم هاتف', bookingsCount:'حجوزات', allMonths:'سجل الرواتب مستقل لكل شهر', days:'يوم', notFound:'لا يوجد راتب لهذا الشهر.', calculated:'يُحسب الراتب بنسبة الحضور ضمن الأيام المجدولة.', noVillas:'لا توجد فلل مضافة.'
+    bookings:'الحجوزات', payroll:'الرواتب', newBooking:'حجز جديد', villa:'الفيلا', room:'الغرفة', guest:'اسم النزيل', phone:'رقم الهاتف', arrival:'تاريخ الوصول', departure:'تاريخ المغادرة', total:'الإجمالي', advance:'المدفوع مقدماً', remaining:'المتبقي', save:'حفظ الحجز', all:'كل الفلل', emptyBookings:'لا توجد حجوزات في هذا العرض', share:'مشاركة واتساب', remove:'حذف', confirmDelete:'هل تريد حذف هذا الحجز؟', conflict:'الغرفة محجوزة بالفعل خلال هذه التواريخ. اختر غرفة أو موعداً آخر.', invalidDates:'يجب أن يكون تاريخ المغادرة بعد تاريخ الوصول.', month:'شهر الرواتب', createMonth:'إنشاء شهر', monthExists:'هذا الشهر موجود بالفعل.', staff:'الموظفون', salary:'الراتب الأساسي', scheduled:'أيام العمل المجدولة', attended:'أيام الحضور', daysOff:'الإجازات', bonus:'مكافأة', deductions:'خصومات', net:'صافي المستحق', totalPayout:'إجمالي المستحقات', attendance:'الحضور', employees:'موظف', addStaff:'إضافة موظف للطاقم', name:'اسم الموظف', saveStaff:'إضافة للطاقم', noStaff:'لا يوجد موظفون في القائمة الأساسية.', backup:'نسخة احتياطية', export:'تصدير JSON', import:'استيراد نسخة', replaceBackup:'استيراد هذه النسخة سيستبدل الحجوزات والطاقم وسجل الرواتب المشترك. هل تريد المتابعة؟', localNotice:'البيانات محفوظة بشكل مشترك وتتم مزامنتها بين الأجهزة المعتمدة. صدّر نسخة احتياطية بانتظام.', backupOk:'تم استيراد النسخة الاحتياطية بنجاح.', backupError:'ملف النسخة غير صالح أو لا يتوافق مع صيغة التطبيق.', bookingSaved:'تم حفظ الحجز.', staffAdded:'تمت إضافة الموظف إلى الطاقم. الأشهر السابقة لن تتغير.', deleteStaff:'حذف من الطاقم', noPhone:'لا يوجد رقم هاتف', bookingsCount:'حجوزات', allMonths:'سجل الرواتب مستقل لكل شهر', days:'يوم', notFound:'لا يوجد راتب لهذا الشهر.', calculated:'يُحسب الراتب بنسبة الحضور ضمن الأيام المجدولة.', noVillas:'لا توجد فلل مضافة.'
   } : {
-    bookings:'Bookings', payroll:'Payroll', newBooking:'New reservation', villa:'Villa', room:'Room', guest:'Guest name', phone:'Phone number', arrival:'Check-in', departure:'Check-out', total:'Total amount', advance:'Deposit paid', remaining:'Remaining', save:'Save booking', all:'All villas', emptyBookings:'No bookings in this view', share:'Share via WhatsApp', remove:'Delete', confirmDelete:'Delete this booking?', conflict:'This room is already booked during those dates. Choose another room or date range.', invalidDates:'Check-out must be after check-in.', month:'Payroll month', createMonth:'Create month', monthExists:'That month already exists.', staff:'Employees', salary:'Base salary', scheduled:'Scheduled days', attended:'Days attended', daysOff:'Days off', bonus:'Bonus', deductions:'Deductions', net:'Net payout', totalPayout:'Total payout', attendance:'Attendance', employees:'employees', addStaff:'Add to staff roster', name:'Employee name', saveStaff:'Add to roster', noStaff:'No employees in the base roster.', backup:'Data backup', export:'Export JSON', import:'Import backup', replaceBackup:'Importing this backup will replace the bookings, roster, and all payroll months currently saved in this browser. Continue?', localNotice:'Data is stored in this browser only. Export a backup regularly.', backupOk:'Backup imported successfully.', backupError:'This file is invalid or does not match the app format.', bookingSaved:'Booking saved.', staffAdded:'Employee added to roster. Past months remain unchanged.', deleteStaff:'Remove from roster', noPhone:'No phone number', bookingsCount:'bookings', allMonths:'Independent payroll records by month', days:'days', notFound:'No payroll for this month.', calculated:'Payout is prorated by attendance against scheduled days.', noVillas:'No villas added.'
+    bookings:'Bookings', payroll:'Payroll', newBooking:'New reservation', villa:'Villa', room:'Room', guest:'Guest name', phone:'Phone number', arrival:'Check-in', departure:'Check-out', total:'Total amount', advance:'Deposit paid', remaining:'Remaining', save:'Save booking', all:'All villas', emptyBookings:'No bookings in this view', share:'Share via WhatsApp', remove:'Delete', confirmDelete:'Delete this booking?', conflict:'This room is already booked during those dates. Choose another room or date range.', invalidDates:'Check-out must be after check-in.', month:'Payroll month', createMonth:'Create month', monthExists:'That month already exists.', staff:'Employees', salary:'Base salary', scheduled:'Scheduled days', attended:'Days attended', daysOff:'Days off', bonus:'Bonus', deductions:'Deductions', net:'Net payout', totalPayout:'Total payout', attendance:'Attendance', employees:'employees', addStaff:'Add to staff roster', name:'Employee name', saveStaff:'Add to roster', noStaff:'No employees in the base roster.', backup:'Data backup', export:'Export JSON', import:'Import backup', replaceBackup:'Importing this backup will replace the shared bookings, staff roster, and payroll records. Continue?', localNotice:'Shared records sync between approved devices. Export a backup regularly.', backupOk:'Backup imported successfully.', backupError:'This file is invalid or does not match the app format.', bookingSaved:'Booking saved.', staffAdded:'Employee added to roster. Past months remain unchanged.', deleteStaff:'Remove from roster', noPhone:'No phone number', bookingsCount:'bookings', allMonths:'Independent payroll records by month', days:'days', notFound:'No payroll for this month.', calculated:'Payout is prorated by attendance against scheduled days.', noVillas:'No villas added.'
   };
+  const applySharedState = useCallback((remote: SharedAppState) => {
+    if (!remote.initialized || !remote.data) return false;
+    revisionRef.current = remote.revision;
+    lastSyncedRef.current = JSON.stringify(remote.data);
+    dataRef.current = remote.data;
+    conflictRef.current = null;
+    setConflictedRemote(null);
+    setData(remote.data);
+    setDataReady(true);
+    setAccessDenied(false);
+    setSessionExpired(false);
+    setSyncStatus('saved');
+    return true;
+  }, []);
+  const markConflict = useCallback((remote: SharedAppState) => {
+    conflictRef.current = remote;
+    setConflictedRemote(remote);
+    setSyncStatus('conflict');
+  }, []);
+  const saveLatest = useCallback(async () => {
+    if (savingRef.current || conflictRef.current) return;
+    savingRef.current = true;
+    setSyncStatus('saving');
+    try {
+      while (true) {
+        const current = dataRef.current;
+        const snapshot = JSON.stringify(current);
+        if (snapshot === lastSyncedRef.current) break;
+
+        const response = await fetch(APP_STATE_PATH, {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ revision: revisionRef.current, data: current }),
+        });
+        const result = await response.json().catch(() => null) as SharedAppState | SharedAppStateConflict | null;
+
+        if (response.status === 409) {
+          const conflict = result as SharedAppStateConflict | null;
+          if (conflict?.current) markConflict(conflict.current);
+          else setSyncStatus('offline');
+          return;
+        }
+        if (response.status === 401) {
+          setDataReady(false);
+          setSessionExpired(true);
+          return;
+        }
+        if (response.status === 403) {
+          setDataReady(false);
+          setAccessDenied(true);
+          return;
+        }
+
+        const saved = result as SharedAppState | null;
+        if (!response.ok || !saved?.initialized || !saved.data) {
+          throw new Error('Shared records could not be saved.');
+        }
+        revisionRef.current = saved.revision;
+        lastSyncedRef.current = JSON.stringify(saved.data);
+        if (JSON.stringify(dataRef.current) === lastSyncedRef.current) break;
+      }
+      setSyncStatus('saved');
+    } catch {
+      setSyncStatus('offline');
+    } finally {
+      savingRef.current = false;
+    }
+  }, [markConflict]);
+
+  useEffect(() => {
+    dataRef.current = data;
+  }, [data]);
+
+  useEffect(() => {
+    let active = true;
+    const initialize = async () => {
+      setSyncStatus('loading');
+      try {
+        const response = await fetch(APP_STATE_PATH, { credentials: 'include' });
+        if (response.status === 401) {
+          if (active) { setDataReady(false); setSessionExpired(true); }
+          return;
+        }
+        if (response.status === 403) {
+          if (active) { setDataReady(false); setAccessDenied(true); }
+          return;
+        }
+        if (!response.ok) throw new Error('Shared records could not be loaded.');
+        const remote = await response.json() as SharedAppState;
+        if (!active) return;
+        if (remote.initialized) {
+          if (!applySharedState(remote)) throw new Error('Shared records are incomplete.');
+          return;
+        }
+
+        const firstSave = await fetch(APP_STATE_PATH, {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ revision: remote.revision, data: dataRef.current }),
+        });
+        const saved = await firstSave.json().catch(() => null) as SharedAppState | SharedAppStateConflict | null;
+        if (!active) return;
+        if (firstSave.status === 409) {
+          const conflict = saved as SharedAppStateConflict | null;
+          if (conflict?.current && applySharedState(conflict.current)) return;
+          throw new Error('Shared records could not be initialized.');
+        }
+        if (firstSave.status === 401) {
+          setDataReady(false); setSessionExpired(true); return;
+        }
+        if (firstSave.status === 403) {
+          setDataReady(false); setAccessDenied(true); return;
+        }
+        if (!firstSave.ok || !applySharedState(saved as SharedAppState)) {
+          throw new Error('Shared records could not be initialized.');
+        }
+      } catch {
+        if (active) {
+          setDataReady(false);
+          setSyncStatus('offline');
+        }
+      }
+    };
+
+    void initialize();
+    return () => { active = false; };
+  }, [retryVersion, applySharedState]);
+
+  useEffect(() => {
+    if (!dataReady) return;
+    const pollSharedData = async () => {
+      if (savingRef.current || conflictRef.current) return;
+      try {
+        const response = await fetch(APP_STATE_PATH, { credentials: 'include' });
+        if (response.status === 401) {
+          setDataReady(false); setSessionExpired(true); return;
+        }
+        if (response.status === 403) {
+          setDataReady(false); setAccessDenied(true); return;
+        }
+        if (!response.ok) throw new Error('Shared records could not be refreshed.');
+
+        const remote = await response.json() as SharedAppState;
+        const dirty = JSON.stringify(dataRef.current) !== lastSyncedRef.current;
+        if (remote.revision > revisionRef.current) {
+          if (dirty) {
+            markConflict(remote);
+            return;
+          }
+          if (!applySharedState(remote)) throw new Error('Shared records are incomplete.');
+          return;
+        }
+        if (dirty) {
+          void saveLatest();
+          return;
+        }
+        setSyncStatus('saved');
+      } catch {
+        setSyncStatus('offline');
+      }
+    };
+
+    const interval = window.setInterval(() => { void pollSharedData(); }, 3000);
+    return () => window.clearInterval(interval);
+  }, [dataReady, applySharedState, markConflict, saveLatest]);
+
+  useEffect(() => {
+    if (!dataReady || conflictedRemote) return;
+    if (JSON.stringify(data) === lastSyncedRef.current) return;
+    const timeout = window.setTimeout(() => { void saveLatest(); }, 450);
+    return () => window.clearTimeout(timeout);
+  }, [data, dataReady, conflictedRemote, saveLatest]);
+
   const activeMonth = data.payrollMonths.find(m => m.id === monthId);
   const sortedMonths = useMemo(() => [...data.payrollMonths].sort((a,b) => b.id.localeCompare(a.id)), [data.payrollMonths]);
   const visibleBookings = data.bookings.filter(b => selectedVilla === 'all' || b.villaId === selectedVilla).slice().sort((a,b) => b.from.localeCompare(a.from));
   const totalPayout = activeMonth?.employees.reduce((sum,e) => sum + e.netPayout,0) ?? 0;
-  useEffect(() => { try { localStorage.setItem(STORE_KEY, JSON.stringify(data)); } catch { setNotice({type:'error',text:'Could not save to browser storage. Export a backup and check available space.'}); } }, [data]);
-  useEffect(() => {
-    const handle = (ev: StorageEvent) => { if (ev.key === STORE_KEY && ev.newValue) { try { setData(JSON.parse(ev.newValue)); } catch { /* ignore malformed cross-tab updates */ } } };
-    window.addEventListener('storage',handle); return () => window.removeEventListener('storage',handle);
-  }, []);
   const changeEmployee = (id:string, field:PayrollEditableField, raw:string) =>
     setData(prev => ({ ...prev, payrollMonths:updatePayrollEmployee(prev.payrollMonths, monthId, id, field, raw) }));
   const createMonth = () => {
@@ -168,6 +418,49 @@ function Home() {
   const inputClass = 'w-full rounded-lg border border-border bg-background px-3 py-2.5 text-sm text-foreground outline-none transition focus:border-primary focus:ring-2 focus:ring-primary/15';
   const smallInput = 'w-[5.8rem] rounded-md border border-border bg-background px-2 py-2 text-right font-mono text-sm outline-none focus:border-primary focus:ring-2 focus:ring-primary/15';
   const activeVillaLabel = (id:string) => { const v=data.villas.find(v=>v.id===id); return lang==='ar'?v?.name:v?.nameEn; };
+  const syncLabels = lang === 'ar'
+    ? { loading:'جارٍ تحميل السجلات المشتركة…', saved:'متزامن بين الأجهزة', saving:'جارٍ حفظ التغييرات…', offline:'غير متصل · ستتم إعادة المحاولة', conflict:'تعارض في المزامنة' }
+    : { loading:'Loading shared records…', saved:'Synced across devices', saving:'Saving changes…', offline:'Offline · retrying', conflict:'Sync conflict' };
+  const syncColors = {
+    loading:'bg-amber-500',
+    saved:'bg-emerald-600',
+    saving:'bg-amber-500',
+    offline:'bg-rose-600',
+    conflict:'bg-rose-600',
+  };
+  if (!dataReady) {
+    const title = accessDenied
+      ? (lang==='ar'?'الحساب غير معتمد':'Account not approved')
+      : sessionExpired
+        ? (lang==='ar'?'انتهت الجلسة':'Sign-in required')
+        : syncStatus === 'offline'
+          ? (lang==='ar'?'تعذر الاتصال بالسجلات المشتركة':'Could not reach shared records')
+          : (lang==='ar'?'جاري التحقق من الوصول':'Checking secure access');
+    const detail = accessDenied
+      ? (lang==='ar'?'استخدم بريداً إلكترونياً معتمداً ومفعّلاً للوصول إلى بيانات التشغيل.':'Use an approved, verified email address to access the staff records.')
+      : sessionExpired
+        ? (lang==='ar'?'سجّل الدخول مرة أخرى لمتابعة العمل.':'Sign in again to continue.')
+        : syncStatus === 'offline'
+          ? (lang==='ar'?'لم يتم عرض أي بيانات. تحقّق من الاتصال ثم أعد المحاولة.':'No payroll data is shown until the shared server is reachable.')
+          : (lang==='ar'?'يتم تحميل البيانات المشتركة بأمان…':'Loading the shared records securely…');
+    return <main className="flex min-h-[100dvh] items-center justify-center bg-background px-4 py-10 text-foreground">
+      <section className="w-full max-w-md rounded-2xl border border-border bg-card p-7 text-center shadow-sm">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-xl bg-primary text-primary-foreground"><Building2 size={24}/></div>
+        <p className="mt-4 text-xs font-bold tracking-[.18em] text-muted-foreground">AWADALLAH · HOTELS & VILLAS</p>
+        <h1 className="mt-5 text-xl font-bold">{title}</h1>
+        <p role="status" className="mt-2 text-sm leading-6 text-muted-foreground">{detail}</p>
+        <div className="mt-6 flex justify-center gap-2">
+          {accessDenied
+            ? <button onClick={()=>void signOut({redirectUrl:basePath||'/'})} className="rounded-lg bg-sidebar px-4 py-2.5 text-sm font-bold text-sidebar-foreground">{lang==='ar'?'تسجيل الخروج':'Sign out'}</button>
+            : sessionExpired
+              ? <a href={`${basePath}/sign-in`} className="rounded-lg bg-sidebar px-4 py-2.5 text-sm font-bold text-sidebar-foreground">{lang==='ar'?'تسجيل الدخول':'Sign in'}</a>
+              : syncStatus === 'offline'
+                ? <button onClick={()=>{setAccessDenied(false);setSessionExpired(false);setRetryVersion(v=>v+1);}} className="rounded-lg bg-sidebar px-4 py-2.5 text-sm font-bold text-sidebar-foreground">{lang==='ar'?'إعادة المحاولة':'Try again'}</button>
+                : <span className="text-xs text-muted-foreground">{syncLabels.loading}</span>}
+        </div>
+      </section>
+    </main>;
+  }
   return <div dir={lang==='ar'?'rtl':'ltr'} className="min-h-[100dvh] bg-background text-foreground">
     <div className="flex min-h-[100dvh] flex-col md:flex-row">
       <aside className="md:sticky md:top-0 md:flex md:h-[100dvh] md:w-[246px] md:shrink-0 md:flex-col bg-sidebar text-sidebar-foreground">
@@ -184,7 +477,7 @@ function Home() {
         </nav>
         <div className="mt-auto hidden p-4 md:block">
           <div className="rounded-xl border border-white/10 bg-white/[.04] p-3.5">
-            <div className="flex items-center gap-2 text-xs font-semibold text-white"><ShieldCheck size={15} className="text-primary"/>{lang==='ar'?'خصوصية البيانات':'Local data'}</div>
+            <div className="flex items-center gap-2 text-xs font-semibold text-white"><ShieldCheck size={15} className="text-primary"/>{lang==='ar'?'السجلات المشتركة':'Shared records'}</div>
             <p className="mt-2 text-[11px] leading-relaxed text-sidebar-foreground/55">{t.localNotice}</p>
           </div>
           <div className="mt-4 text-[10px] text-sidebar-foreground/35">AWADALLAH · OPS DESK</div>
@@ -198,11 +491,16 @@ function Home() {
             <div className="mt-0.5 truncate text-lg font-bold tracking-tight">{section==='bookings'?t.bookings:section==='payroll'?t.payroll:lang==='ar'?section==='dashboard'?'لوحة التشغيل':'المخزون':section==='dashboard'?'Operations dashboard':'Inventory'}</div>
           </div>
           <div className="flex items-center gap-2">
-            <div className="hidden items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-[11px] font-medium text-muted-foreground sm:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-600"/>{lang==='ar'?'محفوظ محلياً':'Saved in this browser'}</div>
+            <div aria-live="polite" className="hidden items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1.5 text-[11px] font-medium text-muted-foreground sm:flex"><span className={`h-1.5 w-1.5 rounded-full ${syncColors[syncStatus]}`}/>{syncLabels[syncStatus]}</div>
             <button data-testid="button-language" onClick={()=>setLang(lang==='en'?'ar':'en')} className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-xs font-semibold hover:bg-muted"><Globe2 size={15}/>{lang==='en'?'العربية':'English'}</button>
+            <button onClick={()=>void signOut({redirectUrl:basePath||'/'})} title={lang==='ar'?'تسجيل الخروج':'Sign out'} aria-label={lang==='ar'?'تسجيل الخروج':'Sign out'} className="flex h-9 w-9 items-center justify-center rounded-lg border border-border bg-card text-muted-foreground hover:bg-muted hover:text-foreground"><LogOut size={15}/></button>
           </div>
         </header>
         <main className="mx-auto w-full max-w-[1500px] px-4 py-6 md:px-8 md:py-8">
+          {conflictedRemote?.data && <div role="alert" className="mb-5 flex flex-col gap-3 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900 sm:flex-row sm:items-center">
+            <div className="flex-1"><div className="font-bold">{lang==='ar'?'تم حفظ تغييرات أحدث على جهاز آخر':'Newer changes were saved on another device'}</div><p className="mt-1 text-xs leading-5">{lang==='ar'?'لم تُحفظ تغييراتك المحلية. صدّر نسخة احتياطية إذا أردت الاحتفاظ بها قبل تحميل السجلات المشتركة الأحدث.':'Your local edits were not saved. Export a backup first if you need them, then load the latest shared records.'}</p></div>
+            <button onClick={()=>{const latest=conflictRef.current;if(latest?.data&&window.confirm(lang==='ar'?'سيتم استبدال التغييرات المحلية بالسجلات المشتركة الأحدث. هل تريد المتابعة؟':'Loading the latest records will discard your unsaved local edits. Continue?'))applySharedState(latest);}} className="shrink-0 rounded-lg bg-rose-900 px-3 py-2 text-xs font-bold text-white hover:bg-rose-800">{lang==='ar'?'تحميل السجلات الأحدث':'Load latest records'}</button>
+          </div>}
           {notice && <div data-testid="status-notice" className={`mb-5 flex items-center gap-2 rounded-lg border px-4 py-3 text-sm ${notice.type==='ok'?'border-emerald-200 bg-emerald-50 text-emerald-800':'border-rose-200 bg-rose-50 text-rose-800'}`}><span className="flex-1">{notice.text}</span><button data-testid="button-dismiss-notice" onClick={()=>setNotice(null)} aria-label="Dismiss"><X size={16}/></button></div>}
           {section==='bookings' ? <div className="fade-in">
             <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -286,7 +584,7 @@ function Home() {
           </div> : null}
           {(section==='dashboard'||section==='inventory')&&<OperationsPanels data={data} setData={setData} lang={lang} monthId={monthId} section={section} onEditBooking={editBooking} onNewBooking={newBookingAt} onNotice={(type,text)=>setNotice({type,text})}/>}
           <div className="mt-7 flex flex-col gap-3 rounded-xl border border-border bg-card px-4 py-3 md:flex-row md:items-center md:justify-between">
-            <div className="flex items-start gap-2.5"><ShieldCheck size={16} className="mt-0.5 shrink-0 text-primary"/><div><div className="text-xs font-bold">{lang==='ar'?'بياناتك تبقى على جهازك':'Your records stay on this device'}</div><p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-muted-foreground">{t.localNotice} {lang==='ar'?'لا يوجد تسجيل دخول أو مزامنة سحابية.':'There is no sign-in or cloud sync.'}</p></div></div>
+            <div className="flex items-start gap-2.5"><ShieldCheck size={16} className="mt-0.5 shrink-0 text-primary"/><div><div className="text-xs font-bold">{lang==='ar'?'السجلات متزامنة بين الأجهزة المعتمدة':'Shared records sync across approved devices'}</div><p className="mt-1 max-w-2xl text-[11px] leading-relaxed text-muted-foreground">{t.localNotice} {lang==='ar'?'تتم المزامنة تلقائياً كل 3 ثوانٍ.':'Updates are checked every 3 seconds.'}</p></div></div>
             <div className="flex shrink-0 gap-2">
               <button data-testid="button-export-backup" onClick={exportBackup} className="flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2 text-xs font-bold transition hover:bg-muted"><Download size={14}/>{t.export}</button>
               <button data-testid="button-import-backup" onClick={()=>importRef.current?.click()} className="flex items-center gap-1.5 rounded-lg bg-sidebar px-3 py-2 text-xs font-bold text-sidebar-foreground transition hover:opacity-90"><Upload size={14}/>{t.import}</button>
@@ -299,14 +597,128 @@ function Home() {
     </div>
   </div>;
 }
-function Router() {
-  return <RoutedErrorBoundary><Switch><Route path="/" component={Home}/><Route component={NotFound}/></Switch></RoutedErrorBoundary>;
+function HomeRoute() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (!isLoaded) return <AuthMessage message="Checking secure access…" />;
+  return isSignedIn ? <Redirect to="/app" /> : <LandingPage />;
 }
+
+function WorkspaceRoute() {
+  const { isLoaded, isSignedIn } = useAuth();
+  if (!isLoaded) return <AuthMessage message="Checking secure access…" />;
+  return isSignedIn ? <PayrollWorkspace /> : <Redirect to="/sign-in" />;
+}
+
+function AuthMessage({ message }: { message: string }) {
+  return <main className="flex min-h-[100dvh] items-center justify-center bg-background px-4 text-foreground">
+    <p role="status" className="text-sm text-muted-foreground">{message}</p>
+  </main>;
+}
+
+function BrandLockup() {
+  return <div className="flex items-center gap-3">
+    <img src={`${basePath}/logo.svg`} alt="" className="h-11 w-11 rounded-xl" />
+    <div><div className="text-sm font-bold tracking-tight text-[#25303d]">AWADALLAH</div><div className="mt-0.5 text-[10px] tracking-[.17em] text-[#737b88]">HOTELS & VILLAS</div></div>
+  </div>;
+}
+
+function LandingPage() {
+  return <main className="min-h-[100dvh] bg-[#f7f5ef] text-[#25303d]">
+    <header className="mx-auto flex max-w-6xl items-center justify-between px-5 py-6">
+      <BrandLockup />
+      <a href={`${basePath}/sign-in`} className="rounded-lg border border-[#ddd6ca] bg-white px-4 py-2.5 text-sm font-semibold hover:bg-[#f1eee6]">Sign in</a>
+    </header>
+    <section className="mx-auto grid max-w-6xl gap-12 px-5 pb-16 pt-12 md:pt-20 lg:grid-cols-[1.1fr_.9fr] lg:items-center">
+      <div>
+        <div className="inline-flex items-center gap-2 rounded-full border border-[#e5dccb] bg-white/70 px-3 py-1.5 text-[11px] font-bold uppercase tracking-[.15em] text-[#8f641e]"><ShieldCheck size={14}/> Staff workspace</div>
+        <h1 className="mt-6 max-w-2xl text-4xl font-bold leading-tight tracking-tight sm:text-5xl">Villa operations, shared with your team.</h1>
+        <p className="mt-5 max-w-xl text-base leading-7 text-[#65707d]">Manage reservations, properties, staff and monthly payroll from one workspace. Records sync across approved devices.</p>
+        <div className="mt-8 flex flex-wrap gap-3">
+          <a href={`${basePath}/sign-in`} className="rounded-lg bg-[#25303d] px-5 py-3 text-sm font-bold text-white transition hover:bg-[#1c2530]">Sign in</a>
+          <a href={`${basePath}/sign-up`} className="rounded-lg border border-[#ddd6ca] bg-white px-5 py-3 text-sm font-bold text-[#25303d] transition hover:bg-[#f1eee6]">Create staff account</a>
+        </div>
+        <p className="mt-5 text-xs text-[#737b88]">Access requires an approved, verified email address.</p>
+      </div>
+      <div className="rounded-2xl border border-[#e3dccf] bg-[#fffcf6] p-6 shadow-[0_20px_60px_-36px_rgba(37,48,61,.35)] sm:p-8">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-[#f2e8d4] text-[#8f641e]"><Building2 size={21}/></div>
+          <div><div className="text-sm font-bold">Awadallah Hotels & Villas</div><div className="mt-1 text-xs text-[#737b88]">Operations desk</div></div>
+        </div>
+        <div className="my-6 h-px bg-[#e9e2d6]"/>
+        <div className="space-y-4">
+          {[['01','Bookings and guest stays'],['02','Staff and monthly payroll'],['03','Properties and inventory']].map(([number,label])=><div key={number} className="flex items-center gap-3 rounded-xl border border-[#eee8de] bg-white px-4 py-3.5"><span className="font-mono text-xs text-[#a47628]">{number}</span><span className="text-sm font-semibold">{label}</span></div>)}
+        </div>
+        <div className="mt-6 flex items-center gap-2 text-xs font-medium text-[#65707d]"><span className="h-2 w-2 rounded-full bg-emerald-600"/> Shared records refresh every 3 seconds</div>
+      </div>
+    </section>
+  </main>;
+}
+
+function SignInPage() {
+  return <main className="min-h-[100dvh] bg-[#f7f5ef] px-4 py-8">
+    <header className="mx-auto max-w-6xl"><a href={basePath || '/'}><BrandLockup /></a></header>
+    <div className="mx-auto mt-12 max-w-xl text-center">
+      <p className="text-xs font-bold uppercase tracking-[.16em] text-[#9a6a19]">Secure staff access</p>
+      <p className="mt-2 text-sm text-[#737b88]">Sign in with an approved and verified email address.</p>
+    </div>
+    <div className="mt-6 flex justify-center">
+      <SignIn routing="path" path={`${basePath}/sign-in`} signUpUrl={`${basePath}/sign-up`} />
+    </div>
+  </main>;
+}
+
+function SignUpPage() {
+  return <main className="min-h-[100dvh] bg-[#f7f5ef] px-4 py-8">
+    <header className="mx-auto max-w-6xl"><a href={basePath || '/'}><BrandLockup /></a></header>
+    <div className="mx-auto mt-12 max-w-xl text-center">
+      <p className="text-xs font-bold uppercase tracking-[.16em] text-[#9a6a19]">Staff account</p>
+      <p className="mt-2 text-sm text-[#737b88]">Only approved, verified email addresses can open payroll records.</p>
+    </div>
+    <div className="mt-6 flex justify-center">
+      <SignUp routing="path" path={`${basePath}/sign-up`} signInUrl={`${basePath}/sign-in`} />
+    </div>
+  </main>;
+}
+
+function ApplicationRoutes() {
+  return <RoutedErrorBoundary><Switch>
+    <Route path="/sign-in/*?" component={SignInPage}/>
+    <Route path="/sign-up/*?" component={SignUpPage}/>
+    <Route path="/app" component={WorkspaceRoute}/>
+    <Route path="/" component={HomeRoute}/>
+    <Route component={NotFound}/>
+  </Switch></RoutedErrorBoundary>;
+}
+
+function ClerkProviderWithRoutes() {
+  const [, setLocation] = useLocation();
+  return <ClerkProvider
+    publishableKey={clerkPubKey}
+    proxyUrl={clerkProxyUrl}
+    appearance={clerkAppearance}
+    signInUrl={`${basePath}/sign-in`}
+    signUpUrl={`${basePath}/sign-up`}
+    localization={{
+      signIn: { start: { title: 'Welcome back', subtitle: 'Sign in to access your team records' } },
+      signUp: { start: { title: 'Create your account', subtitle: 'Access is limited to approved staff' } },
+    }}
+    routerPush={(to)=>setLocation(stripBase(to))}
+    routerReplace={(to)=>setLocation(stripBase(to),{replace:true})}
+  >
+    <QueryClientProvider client={queryClient}>
+      <TooltipProvider>
+        <ApplicationRoutes />
+        <Toaster />
+      </TooltipProvider>
+    </QueryClientProvider>
+  </ClerkProvider>;
+}
+
 function RoutedErrorBoundary({children}:{children:ReactNode}) {
   const [location] = useLocation();
   return <ErrorBoundary resetKey={location}>{children}</ErrorBoundary>;
 }
 function App() {
-  return <QueryClientProvider client={queryClient}><TooltipProvider><WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/,'')}><Router/></WouterRouter><Toaster/></TooltipProvider></QueryClientProvider>;
+  return <WouterRouter base={basePath}><ClerkProviderWithRoutes /></WouterRouter>;
 }
 export default App;

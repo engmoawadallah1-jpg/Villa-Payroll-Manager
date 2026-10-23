@@ -14,7 +14,8 @@ A bilingual Arabic/English operations app for Awadallah Hotels & Villas, coverin
 ## Stack
 
 - pnpm workspaces, React, Vite, TypeScript
-- Browser `localStorage` for app data; no database or API connection is required by this app
+- Clerk sign-in, an Express API, and PostgreSQL for shared app data
+- Browser `localStorage` is retained only as a first-run migration source
 
 ## Where things live
 
@@ -22,12 +23,17 @@ A bilingual Arabic/English operations app for Awadallah Hotels & Villas, coverin
 - `artifacts/villa-payroll-manager/src/payroll.ts` — payroll calculations and month records
 - `artifacts/villa-payroll-manager/src/operations.ts` — booking, inventory, and data migration logic
 - `artifacts/villa-payroll-manager/src/*.test.ts` — payroll and operations tests
-- `artifacts/api-server` — shared API scaffold; not currently used by the app
+- `artifacts/api-server` — authenticated API and shared-state persistence
+- `lib/db/src/schema/villa-app-state.ts` — PostgreSQL shared-state table
+- `lib/api-spec/openapi.yaml` — API contract; regenerate with `pnpm --filter @workspace/api-spec run codegen`
 
 ## Architecture decisions
 
-- Bookings, inventory, staff, and payroll records are saved in the current browser, with JSON export/import for backups.
+- Bookings, inventory, staff, and payroll records are stored together in one PostgreSQL JSONB document and polled every three seconds.
+- Saves use a revision check; when another device has newer data, keep the local edits visible and ask the user before loading the newer shared copy.
+- API access requires a Clerk session and a verified email listed in the `VILLA_PAYROLL_ALLOWED_EMAILS` environment variable. Never hardcode approved addresses.
 - Payroll records are kept independently by month; changes to the staff roster do not rewrite past month snapshots.
+- The first approved session initializes the shared record from that browser's migrated local data; afterward PostgreSQL is the source of truth.
 
 ## Product
 
@@ -41,9 +47,9 @@ No additional preferences recorded.
 
 ## Gotchas
 
-- Data does not sync across browsers or devices. Export backups regularly; clearing browser storage can remove the local copy.
-- The app has no account authentication. Do not use it for confidential payroll data on a shared device.
-- Importing a backup replaces the current browser's saved bookings, roster, and payroll months.
+- New accounts do not have data access unless their verified email is allowlisted by the server.
+- Export JSON backups regularly. Importing a backup replaces the shared bookings, roster, inventory, and payroll records.
+- A detected cross-device conflict is not auto-merged; export a backup of local edits before choosing to load the latest shared data.
 
 ## Pointers
 
