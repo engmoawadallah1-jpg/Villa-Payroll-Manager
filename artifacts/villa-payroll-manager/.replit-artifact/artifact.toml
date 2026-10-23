@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Villa Payroll Manager"
+description = "A bilingual Arabic and English app for managing villa and hotel bookings, monthly staff attendance, bonuses, deductions, and payroll calculations, with local data backups."
+version = "1.0.0"
+id = "artifacts/villa-payroll-manager"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23039
+
+[services.development]
+run = "pnpm --filter @workspace/villa-payroll-manager run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/villa-payroll-manager", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/villa-payroll-manager/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23039"
+BASE_PATH = "/"

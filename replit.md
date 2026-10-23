@@ -1,44 +1,49 @@
-# [Project name]
+# Villa Payroll Manager
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A bilingual Arabic/English operations app for Awadallah Hotels & Villas, covering bookings, inventory, and monthly staff payroll.
 
 ## Run & Operate
 
-- `pnpm --filter @workspace/api-server run dev` — run the API server (port 5000)
+- `pnpm --filter @workspace/villa-payroll-manager run dev` — run the app preview
+- `pnpm --filter @workspace/villa-payroll-manager run test` — run payroll and operations tests
+- `pnpm --filter @workspace/villa-payroll-manager run typecheck` — typecheck the app
+- `PORT=23039 BASE_PATH=/ pnpm --filter @workspace/villa-payroll-manager run build` — build the app
 - `pnpm run typecheck` — full typecheck across all packages
 - `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from the OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- Required env: `DATABASE_URL` — Postgres connection string
 
 ## Stack
 
-- pnpm workspaces, Node.js 24, TypeScript 5.9
-- API: Express 5
-- DB: PostgreSQL + Drizzle ORM
-- Validation: Zod (`zod/v4`), `drizzle-zod`
-- API codegen: Orval (from OpenAPI spec)
-- Build: esbuild (CJS bundle)
+- pnpm workspaces, React, Vite, TypeScript
+- Browser `localStorage` for app data; no database or API connection is required by this app
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `artifacts/villa-payroll-manager/src/App.tsx` — app interface and interactions
+- `artifacts/villa-payroll-manager/src/payroll.ts` — payroll calculations and month records
+- `artifacts/villa-payroll-manager/src/operations.ts` — booking, inventory, and data migration logic
+- `artifacts/villa-payroll-manager/src/*.test.ts` — payroll and operations tests
+- `artifacts/api-server` — shared API scaffold; not currently used by the app
 
 ## Architecture decisions
 
-_Populate as you build — non-obvious choices a reader couldn't infer from the code (3-5 bullets)._
+- Bookings, inventory, staff, and payroll records are saved in the current browser, with JSON export/import for backups.
+- Payroll records are kept independently by month; changes to the staff roster do not rewrite past month snapshots.
 
 ## Product
 
-_Describe the high-level user-facing capabilities of this app once they exist._
+- Manage villa reservations and prevent overlapping bookings for the same room.
+- Track villa inventory and staff attendance, bonuses, deductions, and net payouts.
+- Switch between Arabic and English.
 
 ## User preferences
 
-_Populate as you build — explicit user instructions worth remembering across sessions._
+No additional preferences recorded.
 
 ## Gotchas
 
-_Populate as you build — sharp edges, "always run X before Y" rules._
+- Data does not sync across browsers or devices. Export backups regularly; clearing browser storage can remove the local copy.
+- The app has no account authentication. Do not use it for confidential payroll data on a shared device.
+- Importing a backup replaces the current browser's saved bookings, roster, and payroll months.
 
 ## Pointers
 
